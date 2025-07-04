@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airconnect
+  namespace: media
+  labels: {app: airconnect}
+spec:
+  replicas: 1          # one instance is enough for all 5 amps
+  selector:
+    matchLabels: {app: airconnect}
+  template:
+    metadata:
+      labels: {app: airconnect}
+    spec:
+      # 1️⃣ critical for multicast discovery
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+      - name: airconnect
+        image: 1activegeek/airconnect:latest
+        # Optional tweaks:
+        # -b <iface>      → bind to a specific NIC (use `ip -br a` to discover)
+        # -l 1000:2000    → recommended Sonos latency (dev notes)
+        env:
+        # Kill the Chromecast bridge if you only care about Sonos
+        - name: AIRCAST_VAR
+          value: "kill"
+        - name: AIRUPNP_ARGS
+          value: "-b eth0 -l 1000:2000"
+        resources:
+          limits: {cpu: "100m", memory: "256Mi"}
+---
+# (Optional) keep related stuff together
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: media
