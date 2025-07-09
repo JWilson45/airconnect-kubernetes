@@ -28,7 +28,8 @@ spec:
         - name: AIRUPNP_ARGS
           value: "-b eth0 -l 1000:2000"
         resources:
-          limits: {cpu: "100m", memory: "256Mi"}
+          requests: {cpu: "500m", memory: "512Mi"}
+          limits: {cpu: "1", memory: "1Gi"}
 ---
 # (Optional) keep related stuff together
 apiVersion: v1
