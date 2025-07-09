@@ -1,0 +1,22 @@
+{
+  "name": "airconnect",
+  "module": "server.js",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "bun build src/server.js --outdir dist --minify --target node",
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@svrooij/sonos": "^2.5.0",
+    "express": "^5.1.0",
+    "ws": "^8.18.3"
+  }
+}
