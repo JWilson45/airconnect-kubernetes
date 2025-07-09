@@ -1,14 +1,13 @@
 // src/sonos.js
 import { SonosManager, SonosEvents } from '@svrooij/sonos';
 
-const manager = new SonosManager();
+export const manager = new SonosManager();
 
 await manager.InitializeWithDiscovery(); // SSDP discovery
 // await manager.SubscribeToAll();
 console.log(`Discovered ${manager.Devices.length} Sonos devices.`); // Log number of discovered devices
 // Helper to find a device by its UUID
 function getDeviceByUuid(uuid) {
-  console.log(`Looking up device with UUID: ${uuid}`); // Log lookup attempt
   return manager.Devices.find(d => d.uuid === uuid);
 }
 
@@ -106,11 +105,11 @@ export function initializeSonosEvents(broadcast) {
 
   const eventMap = [
     { event: SonosEvents.Volume, type: 'volume' },
-    { event: SonosEvents.Muted, type: 'muted' },
-    { event: SonosEvents.CurrentTrackChanged, type: 'track' },
-    { event: SonosEvents.TransportState, type: 'state' },
+    { event: SonosEvents.Mute, type: 'muted' },
+    { event: SonosEvents.CurrentTrackMetadata, type: 'track' },
+    { event: SonosEvents.CurrentTransportState, type: 'state' },
     { event: SonosEvents.GroupName, type: 'groupName' },
-    { event: SonosEvents.ZoneGroupTopology, type: 'groups', getPayload: () => allGroups() }
+    { event: SonosEvents.Coordinator, type: 'groups', getPayload: () => allGroups() }
   ];
 
   manager.Devices.forEach(dev => {
@@ -118,11 +117,11 @@ export function initializeSonosEvents(broadcast) {
       dev.Events.on(event, payload => {
         if (type === 'groups') {
           console.log(`[${dev.Name}] Topology changed`);
-          broadcast(type, { groups: getPayload() });
         } else {
           console.log(`[${dev.Name}] ${type} changed:`, payload);
-          broadcast(type, { uuid: dev.uuid, [type]: getPayload ? getPayload() : payload });
         }
+        const value = type === 'groups' ? getPayload() : payload;
+        broadcast(type, type === 'groups' ? { groups: value } : { uuid: dev.uuid, [type]: value });
       });
     });
   });

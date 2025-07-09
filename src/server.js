@@ -3,6 +3,7 @@ import express from 'express';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 import {
+  manager,
   initializeSonosEvents,
   allPlayers,
   allGroups,
@@ -46,6 +47,26 @@ app.post('/api/:uuid/pause', (req,res)=> {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+wss.on('connection', async socket => {
+  console.log('New WebSocket client connected');
+
+  const players = allPlayers();
+
+  for (const p of players) {
+    const vol = await getVolume(p.uuid);
+    socket.send(JSON.stringify({ type: 'volume', uuid: p.uuid, volume: vol }));
+
+    const device = manager.Devices.find(d => d.uuid === p.uuid);
+    if (device) {
+      socket.send(JSON.stringify({ type: 'muted', uuid: p.uuid, muted: device.Muted }));
+      socket.send(JSON.stringify({ type: 'state', uuid: p.uuid, state: device.CurrentTransportStateSimple }));
+      socket.send(JSON.stringify({ type: 'track', uuid: p.uuid, track: device.AVTransportService?.LastChangeEnqueuedMetadata }));
+    }
+  }
+
+  socket.send(JSON.stringify({ type: 'groups', groups: allGroups() }));
+});
+
 // Broadcast a message to all connected WebSocket clients
 function broadcast(type, payload) {
   const msg = JSON.stringify({ type, ...payload });
@@ -84,6 +105,21 @@ app.post('/api/:uuid/unjoin', async (req, res) => {
   console.log(`/api/${req.params.uuid}/unjoin`);
   await unjoin(req.params.uuid);
   res.sendStatus(204);
+});
+
+// Route to get full state of a specific Sonos player by UUID
+app.get('/api/:uuid/state', (req, res) => {
+  const device = manager.Devices.find(d => d.uuid === req.params.uuid);
+  if (!device) return res.sendStatus(404);
+
+  res.json({
+    uuid: device.uuid,
+    name: device.Name,
+    volume: device.Volume,
+    muted: device.Muted,
+    state: device.CurrentTransportStateSimple,
+    track: device.AVTransportService?.LastChangeEnqueuedMetadata,
+  });
 });
 
 server.listen(3000, ()=>console.log('Dashboard on :3000'));
