@@ -7,6 +7,8 @@ import {
   initializeSonosEvents,
   allPlayers,
   allGroups,
+  managedModelNames,
+  playerState,
   play,
   pause,
   join,
@@ -17,32 +19,76 @@ import {
 
 console.log('Starting Sonos Dashboard Server...');
 
-const app  = express();
+const app = express();
+app.use(express.json());
 app.use(express.static('public'));
 
-// Route to get all Sonos players
+function sendError(res, error, fallbackStatus = 500) {
+  const status = /not found/i.test(error.message) ? 404 : fallbackStatus;
+  console.error(error);
+  res.status(status).json({ error: error.message });
+}
+
+function asyncRoute(handler) {
+  return (req, res) => {
+    Promise.resolve(handler(req, res)).catch(error => sendError(res, error));
+  };
+}
+
+app.get('/api/config', (_, res) => {
+  res.json({ managedModels: managedModelNames() });
+});
+
 app.get('/api/players', (_, res) => {
-  console.log(`/api/players → allPlayers()`);
   res.json(allPlayers());
 });
 
-// Route to get all Sonos groups
 app.get('/api/groups', (_, res) => {
-  console.log(`/api/groups → allGroups()`);
   res.json(allGroups());
 });
 
-// Route to play a specific Sonos player by UUID
-app.post('/api/:uuid/play',  (req,res)=> {
-  console.log(`/api/${req.params.uuid}/play`);
-  play(req.params.uuid).then(()=>res.sendStatus(204));
-});
+app.get('/api/state', asyncRoute(async (_, res) => {
+  const players = allPlayers();
+  const states = await Promise.all(players.map(player => playerState(player.uuid)));
+  res.json({
+    players,
+    groups: allGroups(),
+    states
+  });
+}));
 
-// Route to pause a specific Sonos player by UUID
-app.post('/api/:uuid/pause', (req,res)=> {
-  console.log(`/api/${req.params.uuid}/pause`);
-  pause(req.params.uuid).then(()=>res.sendStatus(204));
-});
+app.get('/api/:uuid/state', asyncRoute(async (req, res) => {
+  res.json(await playerState(req.params.uuid));
+}));
+
+app.get('/api/:uuid/volume', asyncRoute(async (req, res) => {
+  res.json({ volume: await getVolume(req.params.uuid) });
+}));
+
+app.post('/api/:uuid/volume/:vol', asyncRoute(async (req, res) => {
+  await setVolume(req.params.uuid, req.params.vol);
+  res.sendStatus(204);
+}));
+
+app.post('/api/:uuid/play', asyncRoute(async (req, res) => {
+  await play(req.params.uuid);
+  res.sendStatus(204);
+}));
+
+app.post('/api/:uuid/pause', asyncRoute(async (req, res) => {
+  await pause(req.params.uuid);
+  res.sendStatus(204);
+}));
+
+app.post('/api/:uuid/join/:to', asyncRoute(async (req, res) => {
+  await join(req.params.uuid, req.params.to);
+  res.sendStatus(204);
+}));
+
+app.post('/api/:uuid/unjoin', asyncRoute(async (req, res) => {
+  await unjoin(req.params.uuid);
+  res.sendStatus(204);
+}));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -50,76 +96,32 @@ const wss = new WebSocketServer({ server });
 wss.on('connection', async socket => {
   console.log('New WebSocket client connected');
 
-  const players = allPlayers();
+  try {
+    const players = allPlayers();
+    socket.send(JSON.stringify({ type: 'players', players }));
+    socket.send(JSON.stringify({ type: 'groups', groups: allGroups() }));
 
-  for (const p of players) {
-    const vol = await getVolume(p.uuid);
-    socket.send(JSON.stringify({ type: 'volume', uuid: p.uuid, volume: vol }));
-
-    const device = manager.Devices.find(d => d.uuid === p.uuid);
-    if (device) {
-      socket.send(JSON.stringify({ type: 'muted', uuid: p.uuid, muted: device.Muted }));
-      socket.send(JSON.stringify({ type: 'state', uuid: p.uuid, state: device.CurrentTransportStateSimple }));
-      socket.send(JSON.stringify({ type: 'track', uuid: p.uuid, track: device.AVTransportService?.LastChangeEnqueuedMetadata }));
-    }
+    const states = await Promise.all(players.map(player => playerState(player.uuid)));
+    states.forEach(state => {
+      socket.send(JSON.stringify({ type: 'stateSnapshot', ...state }));
+    });
+  } catch (error) {
+    socket.send(JSON.stringify({ type: 'error', error: error.message }));
   }
-
-  socket.send(JSON.stringify({ type: 'groups', groups: allGroups() }));
 });
 
-// Broadcast a message to all connected WebSocket clients
 function broadcast(type, payload) {
   const msg = JSON.stringify({ type, ...payload });
-  // console.log(`Broadcasting: ${msg}`);
-  wss.clients.forEach(c => {
-    if (c.readyState === c.OPEN) c.send(msg);
+  wss.clients.forEach(client => {
+    if (client.readyState === client.OPEN) client.send(msg);
   });
 }
 
 initializeSonosEvents(broadcast);
 
-// Route to get volume of a specific Sonos player by UUID
-app.get('/api/:uuid/volume', async (req, res) => {
-  console.log(`/api/${req.params.uuid}/volume → GET`);
-  const v = await getVolume(req.params.uuid);
-  if (v === null) return res.sendStatus(404);
-  res.json({ volume: v });
+const port = Number(process.env.PORT || 3000);
+server.listen(port, () => {
+  console.log(`Dashboard on :${port}`);
+  console.log(`Managing Sonos models: ${managedModelNames().join(', ')}`);
+  console.log(`Total Sonos devices discovered: ${manager.Devices.length}`);
 });
-
-// Route to set volume of a specific Sonos player by UUID
-app.post('/api/:uuid/volume/:vol', async (req, res) => {
-  console.log(`/api/${req.params.uuid}/volume/${req.params.vol} → SET`);
-  await setVolume(req.params.uuid, req.params.vol);
-  res.sendStatus(204);
-});
-
-// Route to join a Sonos player to another group/player
-app.post('/api/:uuid/join/:to', async (req, res) => {
-  console.log(`/api/${req.params.uuid}/join/${req.params.to}`);
-  await join(req.params.uuid, req.params.to);
-  res.sendStatus(204);
-});
-
-// Route to unjoin a Sonos player from its group
-app.post('/api/:uuid/unjoin', async (req, res) => {
-  console.log(`/api/${req.params.uuid}/unjoin`);
-  await unjoin(req.params.uuid);
-  res.sendStatus(204);
-});
-
-// Route to get full state of a specific Sonos player by UUID
-app.get('/api/:uuid/state', (req, res) => {
-  const device = manager.Devices.find(d => d.uuid === req.params.uuid);
-  if (!device) return res.sendStatus(404);
-
-  res.json({
-    uuid: device.uuid,
-    name: device.Name,
-    volume: device.Volume,
-    muted: device.Muted,
-    state: device.CurrentTransportStateSimple,
-    track: device.AVTransportService?.LastChangeEnqueuedMetadata,
-  });
-});
-
-server.listen(3000, ()=>console.log('Dashboard on :3000'));

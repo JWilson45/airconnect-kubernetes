@@ -1,154 +1,387 @@
 // public/dashboard.js
-const api = p => fetch(p).then(r => r.json());
-const div = id => document.getElementById(id);
-
-const debounceMap = {};
-function debounceVol(uuid, value) {
-  clearTimeout(debounceMap[uuid]);
-  debounceMap[uuid] = setTimeout(() => setVol(uuid, value), 150);
-}
-
-const handlers = {
-  volume: m => {
-    console.log('WS Volume Update:', m);
-
-    const span = document.getElementById(`vol-${m.uuid}`);
-    const slider = document.getElementById(`slider-${m.uuid}`);
-    if (span) span.textContent = m.volume;
-    if (slider && slider !== document.activeElement) {
-      console.log(`Updating slider-${m.uuid} to ${m.volume}`);
-      slider.value = m.volume;
-    } else if (!slider) {
-      console.warn(`Slider for ${m.uuid} not found`);
-    } else {
-      console.log(`Skipped slider update for ${m.uuid} (user active)`);
-    }
-  },
-  groups: m => renderGroups(m.groups),
-  muted: m => {
-    const el = document.getElementById(`mute-${m.uuid}`);
-    if (el) el.textContent = m.muted ? '🔇' : '';
-  },
-  track: m => {
-    const el = document.getElementById(`track-${m.uuid}`);
-    if (el) el.textContent = m.track?.title ?? '';
-  },
-  state: m => {
-    const el = document.getElementById(`state-${m.uuid}`);
-    if (el) el.textContent = m.state;
-  },
-  groupName: () => load()
+const appState = {
+  players: [],
+  groups: [],
+  states: new Map(),
+  managedModels: [],
+  pendingVolumes: new Map(),
+  ws: null
 };
 
-// realtime updates with auto-reconnect
-let ws;
+const $ = id => document.getElementById(id);
 
-function connectWebSocket() {
-  ws = new WebSocket(`ws://${location.host}`);
-
-  ws.onopen = () => console.log('[WebSocket] Connected');
-
-  ws.onmessage = ev => {
-    const m = JSON.parse(ev.data);
-    (handlers[m.type] || (() => {}))(m);
-  };
-
-  ws.onclose = () => {
-    console.warn('[WebSocket] Disconnected. Retrying in 2 seconds...');
-    setTimeout(connectWebSocket, 2000);
-  };
-
-  ws.onerror = err => {
-    console.error('[WebSocket] Error:', err);
-    ws.close(); // triggers onclose
-  };
+async function api(path, options = {}) {
+  const response = await fetch(path, options);
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      if (body.error) message = body.error;
+    } catch {}
+    throw new Error(message);
+  }
+  if (response.status === 204) return null;
+  return response.json();
 }
 
-connectWebSocket();
+function setStatus(status, label) {
+  const dot = $('status-dot');
+  dot.className = `dot ${status}`;
+  $('status-text').textContent = label;
+}
+
+function showAlert(message) {
+  $('alert').innerHTML = message ? `<div class="alert">${escapeHtml(message)}</div>` : '';
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function normalizeState(state) {
+  return {
+    uuid: state.uuid,
+    volume: Number.isFinite(Number(state.volume)) ? Number(state.volume) : 0,
+    muted: Boolean(state.muted),
+    state: state.state || 'UNKNOWN',
+    track: state.track || null
+  };
+}
 
 async function load() {
-  const [players, groups] = await Promise.all([api('/api/players'), api('/api/groups')]);
-  renderPlayers(players);
-  renderGroups(groups);
+  try {
+    showAlert('');
+    const [config, snapshot] = await Promise.all([
+      api('/api/config'),
+      api('/api/state')
+    ]);
+
+    appState.managedModels = config.managedModels || [];
+    appState.players = snapshot.players || [];
+    appState.groups = snapshot.groups || [];
+    appState.states = new Map((snapshot.states || []).map(state => [state.uuid, normalizeState(state)]));
+
+    render();
+  } catch (error) {
+    showAlert(error.message);
+  }
 }
 
-function renderPlayers(players) {
-  const container = div('players');
+function render() {
+  $('managed-models').textContent = appState.managedModels.length
+    ? `Managing ${appState.managedModels.join(', ')}`
+    : 'No managed Sonos models configured';
+
+  renderPlayers();
+  renderGroups();
+}
+
+function renderPlayers() {
+  const container = $('players');
   container.innerHTML = '';
-  players.forEach(p => {
-    const row = document.createElement('div');
-    row.innerHTML = `
-      <strong>${p.room}</strong>
-      <span id="state-${p.uuid}" class="state"></span>
-      <span id="track-${p.uuid}" class="track"></span>
-      <span id="mute-${p.uuid}" class="mute"></span>
-      <button onclick="cmd('${p.uuid}','play')">▶︎</button>
-      <button onclick="cmd('${p.uuid}','pause')">⏸︎</button>
-      <input type="range" id="slider-${p.uuid}" min="0" max="100"
-             oninput="debounceVol('${p.uuid}',this.value)">
-      <span id="vol-${p.uuid}">--</span>
-      <select id="sel-${p.uuid}">
-        <option value="">— group with —</option>
-        ${players.filter(x=>x.uuid!==p.uuid)
-                  .map(x=>`<option value="${x.uuid}">${x.room}</option>`).join('')}
-      </select>
-      <button onclick="join('${p.uuid}')">Join</button>
-      <button onclick="cmd('${p.uuid}','unjoin')">Ungroup</button>
+
+  if (appState.players.length === 0) {
+    container.innerHTML = '<div class="empty">No managed legacy amps found.</div>';
+    return;
+  }
+
+  appState.players.forEach(player => {
+    const state = appState.states.get(player.uuid) || {};
+    const group = groupForPlayer(player);
+    const groupSize = group?.members?.length ?? 1;
+    const card = document.createElement('article');
+    card.className = 'player';
+    card.dataset.uuid = player.uuid;
+
+    const trackTitle = state.track?.title || 'No track information';
+    const trackMeta = [state.track?.artist, state.track?.album].filter(Boolean).join(' - ');
+    const isPlaying = String(state.state || '').toUpperCase().includes('PLAY');
+    const transportAction = isPlaying ? 'pause' : 'play';
+    const transportLabel = `${isPlaying ? 'Pause' : 'Play'} ${groupSize > 1 ? 'group' : 'room'}`;
+    const destinationGroups = appState.groups.filter(candidate => candidate.coordinator !== player.coordinator);
+    const joinLabel = groupSize > 1 ? 'Move' : 'Join';
+    const soloDisabled = groupSize <= 1;
+
+    card.innerHTML = `
+      <div class="player-head">
+        <div class="room">
+          <h3>${escapeHtml(player.room)}</h3>
+          <div class="meta">${escapeHtml(player.model)} · ${escapeHtml(player.host)} · ${escapeHtml(groupLabel(group, player))}</div>
+        </div>
+        <span class="badge ${isPlaying ? 'playing' : ''}">${escapeHtml(formatState(state.state))}</span>
+      </div>
+
+      <div class="track">
+        <strong>${escapeHtml(trackTitle)}</strong>
+        <span>${escapeHtml(trackMeta)}</span>
+      </div>
+
+      <button class="primary-action ${isPlaying ? 'playing' : ''}" type="button" data-action="transport" data-transport="${transportAction}">
+        ${escapeHtml(transportLabel)}
+      </button>
+
+      <div class="volume">
+        <input type="range" min="0" max="100" value="${Number(state.volume ?? 0)}" data-volume aria-label="${escapeHtml(player.room)} volume">
+        <span class="vol-value">${Number(state.volume ?? 0)}</span>
+      </div>
+
+      <div class="group-control">
+        <select data-join-target aria-label="${escapeHtml(joinLabel)} ${escapeHtml(player.room)} to another group" ${destinationGroups.length ? '' : 'disabled'}>
+          <option value="">${destinationGroups.length ? `${joinLabel} to group` : 'No other groups'}</option>
+          ${destinationGroups.map(target => `<option value="${escapeHtml(target.coordinator)}">${escapeHtml(groupOptionLabel(target))}</option>`).join('')}
+        </select>
+        <button type="button" data-action="join" ${destinationGroups.length ? '' : 'disabled'}>${escapeHtml(joinLabel)}</button>
+      </div>
+
+      <div class="group-actions">
+        <button type="button" data-action="unjoin" ${soloDisabled ? 'disabled' : ''}>Solo room</button>
+        <button type="button" data-action="refresh-card">Refresh state</button>
+      </div>
     `;
-    container.appendChild(row);
-    fetchVolume(p.uuid);
+
+    card.querySelector('[data-action="transport"]').addEventListener('click', event => {
+      command(player.uuid, event.currentTarget.dataset.transport);
+    });
+    card.querySelector('[data-action="join"]').addEventListener('click', () => join(player.uuid, card));
+    card.querySelector('[data-action="unjoin"]').addEventListener('click', () => command(player.uuid, 'unjoin'));
+    card.querySelector('[data-action="refresh-card"]').addEventListener('click', () => refreshPlayer(player.uuid));
+
+    const slider = card.querySelector('[data-volume]');
+    slider.addEventListener('input', event => updateVolumePreview(player.uuid, event.target.value, card));
+    slider.addEventListener('change', event => setVolume(player.uuid, event.target.value));
+
+    container.appendChild(card);
   });
 }
 
-function renderGroups(groups) {
-  const container = div('groups');
+function groupForPlayer(player) {
+  return appState.groups.find(group => group.members.some(member => member.uuid === player.uuid))
+    || appState.groups.find(group => group.coordinator === player.coordinator)
+    || null;
+}
+
+function groupLabel(group, player) {
+  if (!group || group.members.length <= 1) return 'Solo';
+  const others = group.members
+    .filter(member => member.uuid !== player.uuid)
+    .map(member => member.room);
+  return `Grouped with ${others.join(', ')}`;
+}
+
+function groupOptionLabel(group) {
+  if (!group) return 'Unknown group';
+  if (group.members.length <= 1) return group.members[0]?.room || group.name;
+  return `${group.name} (${group.members.map(member => member.room).join(', ')})`;
+}
+
+function renderGroups() {
+  const container = $('groups');
   container.innerHTML = '';
-  groups.forEach(g => {
-    const grp = document.createElement('div');
-    grp.innerHTML = `
-      <h3>${g.name}</h3>
-      <ul>
-        ${g.members.map(m => `<li>${m.room}
-          ${m.uuid !== g.coordinator ? `<button onclick="cmd('${m.uuid}','unjoin')">Remove</button>` : ''}
-        </li>`).join('')}
+  $('group-count').textContent = `${appState.groups.length}`;
+
+  if (appState.groups.length === 0) {
+    container.innerHTML = '<div class="empty">No active groups.</div>';
+    return;
+  }
+
+  appState.groups.forEach(group => {
+    const section = document.createElement('section');
+    section.className = 'group';
+    section.innerHTML = `
+      <div class="group-title">
+        <h3>${escapeHtml(group.name)}</h3>
+        <span class="small">${group.members.length}</span>
+      </div>
+      <ul class="member-list">
+        ${group.members.map(member => `
+          <li>
+            <span>${escapeHtml(member.room)}</span>
+            ${member.isCoordinator ? '<span class="small">Lead</span>' : ''}
+          </li>
+        `).join('')}
       </ul>
     `;
-    container.appendChild(grp);
+    container.appendChild(section);
   });
 }
 
-function fetchVolume(uuid) {
-  api(`/api/${uuid}/state`).then(d => {
-    if (!d) return;
-    const span = document.getElementById(`vol-${uuid}`);
-    const slider = document.getElementById(`slider-${uuid}`);
-    const state = document.getElementById(`state-${uuid}`);
-    const track = document.getElementById(`track-${uuid}`);
-    const mute = document.getElementById(`mute-${uuid}`);
-
-    if (span) span.textContent = d.volume;
-    if (slider) slider.value = d.volume;
-    if (state) state.textContent = d.state;
-    if (track) track.textContent = d.track?.title ?? '';
-    if (mute) mute.textContent = d.muted ? '🔇' : '';
-  });
+function formatState(state) {
+  if (!state) return 'Unknown';
+  return String(state).replaceAll('_', ' ').toLowerCase();
 }
 
-async function setVol(uuid, value) {
-  await fetch(`/api/${uuid}/volume/${value}`, { method: 'POST' });
+function mergePlayerState(uuid, patch) {
+  const current = appState.states.get(uuid) || { uuid };
+  appState.states.set(uuid, normalizeState({ ...current, ...patch, uuid }));
 }
 
-async function cmd(uuid, action) {
-  await fetch(`/api/${uuid}/${action}`,{method:'POST'});
-  load();
+function patchPlayerCard(uuid, patch) {
+  mergePlayerState(uuid, patch);
+  const card = document.querySelector(`[data-uuid="${CSS.escape(uuid)}"]`);
+  if (!card) {
+    renderPlayers();
+    return;
+  }
+
+  const state = appState.states.get(uuid);
+  const player = appState.players.find(candidate => candidate.uuid === uuid);
+  const group = player ? groupForPlayer(player) : null;
+  const groupSize = group?.members?.length ?? 1;
+  const badge = card.querySelector('.badge');
+  const isPlaying = String(state.state || '').toUpperCase().includes('PLAY');
+  badge.textContent = formatState(state.state);
+  badge.classList.toggle('playing', isPlaying);
+
+  const transport = card.querySelector('[data-action="transport"]');
+  if (transport) {
+    const action = isPlaying ? 'pause' : 'play';
+    transport.dataset.transport = action;
+    transport.textContent = `${isPlaying ? 'Pause' : 'Play'} ${groupSize > 1 ? 'group' : 'room'}`;
+    transport.classList.toggle('playing', isPlaying);
+  }
+
+  const track = card.querySelector('.track');
+  const trackTitle = state.track?.title || 'No track information';
+  const trackMeta = [state.track?.artist, state.track?.album].filter(Boolean).join(' - ');
+  track.innerHTML = `<strong>${escapeHtml(trackTitle)}</strong><span>${escapeHtml(trackMeta)}</span>`;
+
+  const slider = card.querySelector('[data-volume]');
+  const value = card.querySelector('.vol-value');
+  if (!appState.pendingVolumes.has(uuid) && document.activeElement !== slider) {
+    slider.value = state.volume;
+    value.textContent = state.volume;
+  }
 }
 
-async function join(uuid) {
-  const to = document.getElementById(`sel-${uuid}`).value;
-  if (to) {
-    await fetch(`/api/${uuid}/join/${to}`,{method:'POST'});
+function updateVolumePreview(uuid, rawValue, card) {
+  const value = Math.max(0, Math.min(100, Number(rawValue)));
+  appState.pendingVolumes.set(uuid, value);
+  card.querySelector('.vol-value').textContent = value;
+
+  clearTimeout(appState.pendingVolumes.get(`${uuid}:timer`));
+  const timer = setTimeout(() => setVolume(uuid, value), 180);
+  appState.pendingVolumes.set(`${uuid}:timer`, timer);
+}
+
+async function setVolume(uuid, rawValue) {
+  const value = Math.max(0, Math.min(100, Number(rawValue)));
+  clearTimeout(appState.pendingVolumes.get(`${uuid}:timer`));
+  appState.pendingVolumes.delete(`${uuid}:timer`);
+
+  try {
+    await api(`/api/${encodeURIComponent(uuid)}/volume/${value}`, { method: 'POST' });
+    appState.pendingVolumes.delete(uuid);
+    mergePlayerState(uuid, { volume: value });
+  } catch (error) {
+    appState.pendingVolumes.delete(uuid);
+    showAlert(error.message);
     load();
   }
 }
 
+async function command(uuid, action) {
+  try {
+    await api(`/api/${encodeURIComponent(uuid)}/${action}`, { method: 'POST' });
+    await load();
+  } catch (error) {
+    showAlert(error.message);
+  }
+}
+
+async function join(uuid, card) {
+  const target = card.querySelector('[data-join-target]').value;
+  if (!target) return;
+
+  try {
+    await api(`/api/${encodeURIComponent(uuid)}/join/${encodeURIComponent(target)}`, { method: 'POST' });
+    await load();
+  } catch (error) {
+    showAlert(error.message);
+  }
+}
+
+async function refreshPlayer(uuid) {
+  try {
+    const state = await api(`/api/${encodeURIComponent(uuid)}/state`);
+    patchPlayerCard(uuid, state);
+  } catch (error) {
+    showAlert(error.message);
+  }
+}
+
+function connectWebSocket() {
+  if (appState.ws) appState.ws.close();
+
+  const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${protocol}://${location.host}`);
+  appState.ws = ws;
+
+  ws.addEventListener('open', () => {
+    setStatus('online', 'Live');
+  });
+
+  ws.addEventListener('message', event => {
+    const message = JSON.parse(event.data);
+
+    if (message.type === 'players') {
+      appState.players = message.players || [];
+      render();
+      return;
+    }
+
+    if (message.type === 'groups') {
+      appState.groups = message.groups || [];
+      render();
+      return;
+    }
+
+    if (message.type === 'stateSnapshot') {
+      patchPlayerCard(message.uuid, message);
+      return;
+    }
+
+    if (message.type === 'volume') {
+      patchPlayerCard(message.uuid, { volume: message.volume });
+      return;
+    }
+
+    if (message.type === 'muted') {
+      patchPlayerCard(message.uuid, { muted: message.muted });
+      return;
+    }
+
+    if (message.type === 'track') {
+      patchPlayerCard(message.uuid, { track: message.track });
+      return;
+    }
+
+    if (message.type === 'state') {
+      patchPlayerCard(message.uuid, { state: message.state });
+      return;
+    }
+
+    if (message.type === 'error') {
+      showAlert(message.error);
+    }
+  });
+
+  ws.addEventListener('close', () => {
+    if (appState.ws !== ws) return;
+    setStatus('offline', 'Reconnecting');
+    setTimeout(connectWebSocket, 2000);
+  });
+
+  ws.addEventListener('error', () => {
+    ws.close();
+  });
+}
+
+$('refresh').addEventListener('click', load);
+
 load();
+connectWebSocket();

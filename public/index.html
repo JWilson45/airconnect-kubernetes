@@ -1,10 +1,399 @@
 <!-- public/index.html -->
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Sonos Dashboard</title>
-<style>body{font-family:sans-serif}</style></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sonos Amp Control</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f8;
+      --panel: #ffffff;
+      --ink: #15191d;
+      --muted: #65717d;
+      --line: #d9dee3;
+      --blue: #1c5d99;
+      --green: #1f7a4d;
+      --red: #b23b3b;
+      --yellow: #8a6400;
+      --shadow: 0 1px 2px rgba(20, 28, 36, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    button {
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: #aab4bf;
+      background: #f9fafb;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    .app {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100vh;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.2;
+      font-weight: 700;
+    }
+
+    .subhead {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 132px;
+      justify-content: flex-end;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--yellow);
+    }
+
+    .dot.online {
+      background: var(--green);
+    }
+
+    .dot.offline {
+      background: var(--red);
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 340px;
+      gap: 16px;
+      width: min(1280px, 100%);
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+      min-height: 36px;
+    }
+
+    .toolbar h2,
+    aside h2 {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.2;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }
+
+    .player,
+    .group,
+    .empty,
+    .alert {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .player {
+      display: grid;
+      gap: 14px;
+      padding: 14px;
+      min-height: 236px;
+    }
+
+    .player-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+
+    .room {
+      min-width: 0;
+    }
+
+    .room h3 {
+      margin: 0;
+      overflow-wrap: anywhere;
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .meta {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .badge {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      border: 1px solid #cfd7df;
+      padding: 3px 8px;
+      color: #3d4954;
+      background: #f8fafc;
+      font-size: 12px;
+      line-height: 1.4;
+      text-transform: capitalize;
+    }
+
+    .badge.playing {
+      color: #0e5a35;
+      border-color: #b9dccb;
+      background: #ecf8f1;
+    }
+
+    .track {
+      min-height: 42px;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+
+    .track strong {
+      display: block;
+      color: var(--ink);
+      font-weight: 600;
+    }
+
+    .primary-action {
+      width: 100%;
+      min-height: 40px;
+      border-color: #b9c7d5;
+      background: #f9fbfd;
+      font-weight: 600;
+    }
+
+    .primary-action.playing {
+      border-color: #b9dccb;
+      color: #0e5a35;
+      background: #ecf8f1;
+    }
+
+    .volume {
+      display: grid;
+      grid-template-columns: 1fr 44px;
+      gap: 10px;
+      align-items: center;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--blue);
+    }
+
+    .vol-value {
+      text-align: right;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .group-control {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+
+    .group-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    select {
+      min-width: 0;
+      height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 8px;
+    }
+
+    aside {
+      min-width: 0;
+    }
+
+    .groups {
+      display: grid;
+      gap: 10px;
+    }
+
+    .group {
+      padding: 12px;
+    }
+
+    .group-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: baseline;
+      margin-bottom: 8px;
+    }
+
+    .group-title h3 {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.25;
+    }
+
+    .member-list {
+      display: grid;
+      gap: 6px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      color: var(--muted);
+    }
+
+    .member-list li {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .empty,
+    .alert {
+      padding: 16px;
+      color: var(--muted);
+    }
+
+    .alert {
+      border-color: #e2b7b7;
+      color: #7f2323;
+      background: #fff7f7;
+      margin-bottom: 12px;
+    }
+
+    @media (max-width: 840px) {
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .status {
+        justify-content: flex-start;
+      }
+
+      main {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 440px) {
+      main,
+      header {
+        padding-left: 12px;
+        padding-right: 12px;
+      }
+
+      .group-control {
+        grid-template-columns: 1fr;
+      }
+
+      .group-actions {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
 <body>
-<h2>Sonos Control</h2><div id="players"></div>
-<h2>Groups</h2>
-<div id="groups"></div>
-<script src="dashboard.js"></script>
-</body></html>
+  <div class="app">
+    <header>
+      <div>
+        <h1>Sonos Amp Control</h1>
+        <div class="subhead" id="managed-models">Loading</div>
+      </div>
+      <div class="status" aria-live="polite">
+        <span class="dot" id="status-dot"></span>
+        <span id="status-text">Connecting</span>
+      </div>
+    </header>
+
+    <main>
+      <section>
+        <div id="alert"></div>
+        <div class="toolbar">
+          <h2>Legacy Amps</h2>
+          <button id="refresh" type="button" title="Refresh">Refresh</button>
+        </div>
+        <div class="grid" id="players"></div>
+      </section>
+
+      <aside>
+        <div class="toolbar">
+          <h2>Groups</h2>
+          <span class="small" id="group-count"></span>
+        </div>
+        <div class="groups" id="groups"></div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

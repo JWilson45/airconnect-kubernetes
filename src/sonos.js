@@ -1,128 +1,267 @@
 // src/sonos.js
 import { SonosManager, SonosEvents } from '@svrooij/sonos';
 
+const DEFAULT_LEGACY_MODELS = 'Sonos Connect:Amp';
+const managedModels = new Set(
+  (process.env.SONOS_MANAGED_MODELS || DEFAULT_LEGACY_MODELS)
+    .split(',')
+    .map(model => model.trim())
+    .filter(Boolean)
+);
+
 export const manager = new SonosManager();
 
-await manager.InitializeWithDiscovery(); // SSDP discovery
-// await manager.SubscribeToAll();
-console.log(`Discovered ${manager.Devices.length} Sonos devices.`); // Log number of discovered devices
-// Helper to find a device by its UUID
-function getDeviceByUuid(uuid) {
-  return manager.Devices.find(d => d.uuid === uuid);
+if (process.env.SONOS_HOST) {
+  console.log(`Initializing Sonos from ${process.env.SONOS_HOST}.`);
+  await manager.InitializeFromDevice(process.env.SONOS_HOST);
+} else {
+  await manager.InitializeWithDiscovery();
+}
+console.log(`Discovered ${manager.Devices.length} Sonos devices.`);
+
+const deviceMeta = new Map();
+
+function uuidOf(device) {
+  return device?.Uuid ?? device?.uuid ?? null;
 }
 
-// ─── Volume helpers ───────────────────────────────────────────────────────────
-export async function getVolume(uuid) {
-  console.log(`Getting volume for device ${uuid}`); // Log volume get request
-  const device = getDeviceByUuid(uuid);
-  if (!device) return null;
-  const res = await device.RenderingControlService.GetVolume({
-    InstanceID: 0,
-    Channel: 'Master'
-  });
-  return parseInt(res.CurrentVolume ?? res.CurrentVolume[0] ?? 0, 10);
-}
+async function loadDeviceMeta(device) {
+  const uuid = uuidOf(device);
+  if (!uuid) return null;
+  if (deviceMeta.has(uuid)) return deviceMeta.get(uuid);
 
-export async function setVolume(uuid, vol) {
-  console.log(`Setting volume for device ${uuid} to ${vol}`); // Log volume set request
-  const device = getDeviceByUuid(uuid);
-  if (device) {
-    await device.RenderingControlService.SetVolume({
-      InstanceID: 0,
-      Channel: 'Master',
-      DesiredVolume: Math.max(0, Math.min(100, Number(vol)))
-    });
+  try {
+    const description = await device.GetDeviceDescription();
+    const meta = {
+      modelName: description.modelName,
+      displayName: description.displayName,
+      roomName: description.roomName,
+      host: device.Host
+    };
+    deviceMeta.set(uuid, meta);
+    return meta;
+  } catch (error) {
+    console.warn(`Failed to load Sonos metadata for ${device.Name}:`, error.message);
+    const meta = {
+      modelName: 'Unknown',
+      displayName: 'Unknown',
+      roomName: device.Name,
+      host: device.Host
+    };
+    deviceMeta.set(uuid, meta);
+    return meta;
   }
 }
-// ──────────────────────────────────────────────────────────────────────────────
 
-export function allPlayers() {
-  const players = manager.Devices.map(d => ({
-    room: d.Name,
-    uuid: d.uuid,
-    coordinator: d.Group?.Coordinator?.uuid || null
-  }));
-  console.log(`Reporting ${players.length} players`); // Log number of players reported
-  return players;
+await Promise.all(manager.Devices.map(loadDeviceMeta));
+
+function allDevices() {
+  return manager.Devices;
 }
 
-// Add this function to return current groups
-// Build a fresh snapshot of all current Sonos groups
+function managedDevices() {
+  return allDevices().filter(device => {
+    const meta = deviceMeta.get(uuidOf(device));
+    return managedModels.has(meta?.modelName);
+  });
+}
+
+function getManagedDeviceByUuid(uuid) {
+  return managedDevices().find(device => uuidOf(device) === uuid);
+}
+
+function requireManagedDevice(uuid) {
+  const device = getManagedDeviceByUuid(uuid);
+  if (!device) {
+    throw new Error(`Managed Sonos device not found: ${uuid}`);
+  }
+  return device;
+}
+
+function parseBool(value) {
+  return value === true || value === '1' || value === 1 || value === 'true';
+}
+
+function parseTrack(metadata) {
+  if (!metadata || typeof metadata !== 'string') return null;
+  const read = tag => {
+    const match = metadata.match(new RegExp(`<[^>]*${tag}[^>]*>(.*?)</[^>]*${tag}>`, 'i'));
+    return match?.[1]?.replace(/&amp;/g, '&').replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>') ?? '';
+  };
+  const title = read('title');
+  const artist = read('creator') || read('artist');
+  const album = read('album');
+  return title || artist || album ? { title, artist, album } : null;
+}
+
+async function getTransportState(device) {
+  try {
+    const result = await device.Coordinator.AVTransportService.GetTransportInfo();
+    return result.CurrentTransportState ?? device.CurrentTransportStateSimple ?? 'UNKNOWN';
+  } catch {
+    return device.CurrentTransportStateSimple ?? 'UNKNOWN';
+  }
+}
+
+async function getTrack(device) {
+  try {
+    const result = await device.Coordinator.AVTransportService.GetPositionInfo();
+    return parseTrack(result.TrackMetaData);
+  } catch {
+    return null;
+  }
+}
+
+export function managedModelNames() {
+  return [...managedModels];
+}
+
+export function allPlayers() {
+  const players = managedDevices().map(device => {
+    const uuid = uuidOf(device);
+    const coordUuid = uuidOf(device.Coordinator);
+    const meta = deviceMeta.get(uuid);
+    return {
+      room: device.Name,
+      uuid,
+      coordinator: coordUuid,
+      isCoordinator: coordUuid === uuid,
+      groupName: device.GroupName ?? device.Name,
+      model: meta?.modelName ?? 'Unknown',
+      displayName: meta?.displayName ?? 'Unknown',
+      host: meta?.host ?? device.Host
+    };
+  });
+
+  console.log(`Reporting ${players.length} managed Sonos players.`);
+  return players.sort((a, b) => a.room.localeCompare(b.room));
+}
+
 export function allGroups() {
   const groups = {};
 
-  manager.Devices.forEach(d => {
-    // Every device has a .Coordinator getter that returns the group coordinator
-    const coord = d.Coordinator;
-    const coordUuid = coord?.Uuid;
-    if (!coordUuid) return; // safety guard
+  managedDevices().forEach(device => {
+    const uuid = uuidOf(device);
+    const coordUuid = uuidOf(device.Coordinator);
+    const key = coordUuid || uuid;
 
-    // Initialise group entry on first encounter of the coordinator
-    if (!groups[coordUuid]) {
-      groups[coordUuid] = {
-        coordinator: coordUuid,
-        name: coord.GroupName ?? 'Unnamed Group',
+    if (!groups[key]) {
+      groups[key] = {
+        coordinator: key,
+        name: device.GroupName ?? device.Coordinator?.Name ?? device.Name,
         members: []
       };
     }
 
-    // Add current device as a member of its coordinator group
-    groups[coordUuid].members.push({
-      uuid: d.Uuid,
-      room: d.Name
+    groups[key].members.push({
+      uuid,
+      room: device.Name,
+      model: deviceMeta.get(uuid)?.modelName ?? 'Unknown',
+      isCoordinator: key === uuid
     });
   });
 
-  console.log(`Reporting ${Object.keys(groups).length} groups`); // Log number of groups reported
-  return Object.values(groups);
+  return Object.values(groups)
+    .map(group => ({
+      ...group,
+      members: group.members.sort((a, b) => a.room.localeCompare(b.room))
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function playerState(uuid) {
+  const device = requireManagedDevice(uuid);
+  const [volume, mute, transportState, track] = await Promise.all([
+    getVolume(uuid),
+    device.RenderingControlService.GetMute({ InstanceID: 0, Channel: 'Master' }).then(res => parseBool(res.CurrentMute)).catch(() => device.Muted ?? false),
+    getTransportState(device),
+    getTrack(device)
+  ]);
+
+  return {
+    uuid,
+    volume,
+    muted: mute,
+    state: transportState,
+    track
+  };
+}
+
+export async function getVolume(uuid) {
+  const device = requireManagedDevice(uuid);
+  const res = await device.RenderingControlService.GetVolume({
+    InstanceID: 0,
+    Channel: 'Master'
+  });
+  return parseInt(res.CurrentVolume ?? res.CurrentVolume?.[0] ?? 0, 10);
+}
+
+export async function setVolume(uuid, vol) {
+  const device = requireManagedDevice(uuid);
+  await device.RenderingControlService.SetVolume({
+    InstanceID: 0,
+    Channel: 'Master',
+    DesiredVolume: Math.max(0, Math.min(100, Number(vol)))
+  });
 }
 
 export async function play(uuid) {
-  console.log(`Playing device ${uuid}`); // Log play action
-  const device = getDeviceByUuid(uuid);
-  await device?.Play();
+  await requireManagedDevice(uuid).Play();
 }
+
 export async function pause(uuid) {
-  console.log(`Pausing device ${uuid}`); // Log pause action
-  const device = getDeviceByUuid(uuid);
-  await device?.Pause();
+  await requireManagedDevice(uuid).Pause();
 }
+
 export async function join(uuid, targetUuid) {
-  console.log(`Joining ${uuid} to ${targetUuid}`); // Log join action
-  const device = getDeviceByUuid(uuid);
-  const target = getDeviceByUuid(targetUuid);
-  await device?.JoinGroup(target.Name);
+  const device = requireManagedDevice(uuid);
+  const target = requireManagedDevice(targetUuid);
+  const coordinatorUuid = uuidOf(target.Coordinator);
+
+  if (!coordinatorUuid || coordinatorUuid === uuidOf(device.Coordinator)) return false;
+
+  await device.AVTransportService.SetAVTransportURI({
+    InstanceID: 0,
+    CurrentURI: `x-rincon:${coordinatorUuid}`,
+    CurrentURIMetaData: ''
+  });
+
+  return true;
 }
+
 export async function unjoin(uuid) {
-  console.log(`Unjoining device ${uuid}`); // Log unjoin action
-  const device = getDeviceByUuid(uuid);
-  // Leave current group and become standalone coordinator
+  const device = requireManagedDevice(uuid);
   await device.AVTransportService.BecomeCoordinatorOfStandaloneGroup({ InstanceID: 0 });
 }
 
 export function initializeSonosEvents(broadcast) {
-  console.log('Subscribing to Sonos events');
+  console.log('Subscribing to managed Sonos events.');
 
   const eventMap = [
-    { event: SonosEvents.Volume, type: 'volume' },
-    { event: SonosEvents.Mute, type: 'muted' },
-    { event: SonosEvents.CurrentTrackMetadata, type: 'track' },
-    { event: SonosEvents.CurrentTransportState, type: 'state' },
-    { event: SonosEvents.GroupName, type: 'groupName' },
-    { event: SonosEvents.Coordinator, type: 'groups', getPayload: () => allGroups() }
+    { event: SonosEvents.Volume, type: 'volume', map: value => ({ volume: Number(value) }) },
+    { event: SonosEvents.Mute, type: 'muted', map: value => ({ muted: parseBool(value) }) },
+    { event: SonosEvents.CurrentTrackMetadata, type: 'track', map: value => ({ track: parseTrack(value) }) },
+    { event: SonosEvents.CurrentTransportState, type: 'state', map: value => ({ state: value }) },
+    { event: SonosEvents.CurrentTransportStateSimple, type: 'state', map: value => ({ state: value }) }
   ];
 
-  manager.Devices.forEach(dev => {
-    eventMap.forEach(({ event, type, getPayload }) => {
-      dev.Events.on(event, payload => {
-        if (type === 'groups') {
-          console.log(`[${dev.Name}] Topology changed`);
-        } else {
-          console.log(`[${dev.Name}] ${type} changed:`, payload);
-        }
-        const value = type === 'groups' ? getPayload() : payload;
-        broadcast(type, type === 'groups' ? { groups: value } : { uuid: dev.uuid, [type]: value });
+  managedDevices().forEach(device => {
+    const uuid = uuidOf(device);
+
+    eventMap.forEach(({ event, type, map }) => {
+      device.Events.on(event, payload => {
+        broadcast(type, { uuid, ...map(payload) });
       });
+    });
+
+    device.Events.on(SonosEvents.Coordinator, () => {
+      broadcast('groups', { groups: allGroups() });
+      broadcast('players', { players: allPlayers() });
+    });
+
+    device.Events.on(SonosEvents.GroupName, () => {
+      broadcast('groups', { groups: allGroups() });
+      broadcast('players', { players: allPlayers() });
     });
   });
 }
