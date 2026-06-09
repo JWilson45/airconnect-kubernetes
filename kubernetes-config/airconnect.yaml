@@ -27,9 +27,9 @@ spec:
           value: "kill"
         # TIP: drop -b to let AirConnect auto-bind; wrong iface causes 'Cannot start' on hostNetwork
         - name: AIRUPNP_VAR
-          # Sonos-recommended latency. Increase only if AirPlay underruns return.
+          # Slightly wider latency for legacy Connect:Amp stability; :f fills brief packet gaps with silence.
           # Auto-bind on the scheduled node, skip the native-AirPlay Arc, and keep inbound RTP/HTTP ports predictable.
-          value: "-a 40000:128 -l 1000:2000 -Z -m Arc -d all=info"
+          value: "-a 40000:128 -l 2000:4000:f -Z -m Arc -d all=warn"
           # If the node firewall is strict, allow TCP/UDP 40000-40127 from the LAN.
         resources:
           requests: {cpu: "1", memory: "1Gi"}
